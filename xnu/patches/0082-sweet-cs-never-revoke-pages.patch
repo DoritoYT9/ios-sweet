@@ -1,0 +1,45 @@
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -85,6 +85,14 @@
+ int cs_force_kill = 0;
+ int cs_force_hard = 0;
+ int cs_debug = 0;
++/*
++ * SWEET: the iOS userland that runs on this phone is not signed by Apple (no
++ * secure boot, no SEP), so a __TEXT page that no longer matches its code
++ * directory is the expected result of patching a daemon, not corruption.
++ * When set, cs_invalid_page() allows the page and keeps the process valid.
++ * Boot-arg sweetcs=0 restores the stock behaviour.
++ */
++static int sweet_cs_permissive = 1;
+ // If set, AMFI will error out early on unsigned code, before evaluation the normal policy.
+ int cs_debug_fail_on_unsigned_code = 0;
+ // If the previous mode is enabled, we count the resulting failures here.
+@@ -180,6 +188,8 @@
+ 	    sizeof(cs_relax_platform_task_ports));
+ 
+ 	PE_parse_boot_argn("cs_debug", &cs_debug, sizeof(cs_debug));
++	PE_parse_boot_argn("sweetcs", &sweet_cs_permissive,
++	    sizeof(sweet_cs_permissive));
+ 
+ #if !CONFIG_ENFORCE_LIBRARY_VALIDATION
+ 	PE_parse_boot_argn("cs_library_val_enable", &cs_library_val_enable,
+@@ -251,6 +261,18 @@
+ 	struct proc     *p;
+ 	int             send_kill = 0, retval = 0, verbose = cs_debug;
+ 	uint64_t flags;
++
++	/*
++	 * SWEET: never revoke CS_VALID and never fail the fault for an invalid
++	 * page: the process keeps running the bytes it has, which is what we
++	 * want for daemons this phone patches on purpose.
++	 */
++	if (sweet_cs_permissive) {
++		if (cs_killed != NULL) {
++			*cs_killed = FALSE;
++		}
++		return 0;
++	}
+ 
+ 	p = current_proc();
+ 

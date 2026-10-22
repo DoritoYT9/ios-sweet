@@ -1,0 +1,254 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -49,6 +49,7 @@
+ extern void thread_deallocate(thread_t);
+ extern int hz;
+ static void sweet_log_start(void);
++static void sweet_log_dump(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+@@ -654,6 +655,7 @@
+ 	printf("SWEET UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
+ 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
++	sweet_log_dump();
+ 	sweet_log_start();
+ 	sweet_sample_start();
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+@@ -802,7 +804,235 @@
+ 	}
+ 	if (kernel_thread_start(sweet_log_thread, NULL, &thread) == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
++	}
++}
++
++/*
++ * The ring above survives a reset, but nothing else on this phone can read
++ * it back (there is no recovery image for it here and fastboot cannot fetch
++ * from the partition), so a boot can ask the kernel to print the tail of the
++ * PREVIOUS boot's log itself -- optionally only the lines that contain one of
++ * a few words, which is what makes a crash loop readable -- and then stop
++ * booting so the text stays on the panel instead of scrolling away:
++ *
++ *   sweetlogdump=64                  KiB to print (absent or 0 = off)
++ *   sweetloggrep=CRASH,exec,SWEET    only lines containing one of these
++ *   sweetlogmax=300                  stop after this many lines (default 300)
++ *   sweetloghalt=1                   do not continue booting after the dump
++ *
++ * The dump is taken from a private copy: every printf below also lands in the
++ * live ring (and reaches the disk on the next flush), which would overwrite
++ * the very bytes being printed.
++ */
++#define SWEET_LOG_DUMP_MAX      (256 * 1024)
++#define SWEET_LOG_DUMP_LINE     192
++#define SWEET_LOG_DUMP_HIST     8
++#define SWEET_LOG_GREP_WORDS    8
++#define SWEET_LOG_GREP_WORD     24
++
++static char sweet_log_dump_buf[SWEET_LOG_DUMP_MAX];
++
++static bool
++sweet_log_dump_match(const char *line, uint32_t len,
++    char words[SWEET_LOG_GREP_WORDS][SWEET_LOG_GREP_WORD], int nwords)
++{
++	for (int w = 0; w < nwords; w++) {
++		size_t wl = strlen(words[w]);
++		if (wl == 0 || wl > len) {
++			continue;
++		}
++		for (uint32_t i = 0; i + wl <= len; i++) {
++			if (memcmp(line + i, words[w], wl) == 0) {
++				return true;
++			}
++		}
++	}
++	return false;
++}
++
++static void
++sweet_log_dump_halt(void)
++{
++	printf("SWEET LOG: halted (sweetloghalt=1); power-cycle to boot\n");
++	for (;;) {
++		(void)tsleep(&sweet_log_chan, PZERO, "sweetlogd", hz);
++	}
++}
++
++static void
++sweet_log_dump(void)
++{
++	char grep[SWEET_LOG_GREP_WORDS * (SWEET_LOG_GREP_WORD + 1)];
++	char words[SWEET_LOG_GREP_WORDS][SWEET_LOG_GREP_WORD];
++	char hist[SWEET_LOG_DUMP_HIST][SWEET_LOG_DUMP_LINE];
++	uint32_t histlen[SWEET_LOG_DUMP_HIST];
++	char magic[9], out[SWEET_LOG_DUMP_LINE];
++	struct sweet_log_header h;
++	void *bounce = (void *)(su.dma + DMA_BOUNCE);
++	uint64_t base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
++	uint64_t total, p0;
++	uint32_t want, size, done, printed = 0, repeats = 0;
++	uint32_t maxlines = 300, halt = 0;
++	int nwords = 0, histpos = 0, error = 0;
++
++	PE_parse_boot_argn("sweetlogdump", &want, sizeof(want));
++	if (want == 0) {
++		return;
++	}
++	if (!su.writable || su.nblocks < 2 * SWEET_LOG_BLOCKS) {
++		return;
++	}
++	PE_parse_boot_argn("sweetlogmax", &maxlines, sizeof(maxlines));
++	PE_parse_boot_argn("sweetloghalt", &halt, sizeof(halt));
++	bzero(grep, sizeof(grep));
++	PE_parse_boot_argn("sweetloggrep", grep, sizeof(grep));
++
++	if (want > (SWEET_LOG_DUMP_MAX - 1) / 1024) {
++		want = (SWEET_LOG_DUMP_MAX - 1) / 1024;
++	}
++	want *= 1024;
++
++	lck_mtx_lock(&sweet_ufs_lock);
++	error = ufs_read_blocks(base, 1);
++	if (!error) {
++		memcpy(&h, bounce, sizeof(h));
++		if (memcmp(h.magic, "SWEETLOG", 8) != 0 || h.version != 1 ||
++		    h.size == 0 || h.size > SWEET_LOG_SIZE) {
++			error = -1;
++		}
++	}
++	lck_mtx_unlock(&sweet_ufs_lock);
++	if (error == -1) {
++		memcpy(magic, h.magic, 8);
++		magic[8] = 0;
++		printf("SWEET LOG: no log from a previous boot (magic \"%s\")\n", magic);
++		return;
++	}
++	if (error) {
++		printf("SWEET LOG: cannot read the log header (%d)\n", error);
++		return;
++	}
++
++	size = h.size;
++	total = h.total;
++	if (total < want) {
++		want = (uint32_t)total;
++	}
++	if (want == 0) {
++		printf("SWEET LOG: the log from the previous boot is empty\n");
++		return;
+ 	}
++
++	/* Copy the wanted range in the order it was written. */
++	p0 = total - want;
++	lck_mtx_lock(&sweet_ufs_lock);
++	for (done = 0; done < want && !error; ) {
++		uint32_t r = (uint32_t)((p0 + done) % size);
++		uint32_t chunk = MIN(want - done, size - r);
++		for (uint32_t o = 0; o < chunk; ) {
++			uint32_t off = (uint32_t)((r + o) % UFS_BLOCK);
++			uint32_t blk = (uint32_t)((r + o) / UFS_BLOCK);
++			uint32_t nb = (chunk - o + off + UFS_BLOCK - 1) / UFS_BLOCK;
++			uint32_t take;
++
++			nb = MIN(nb, (uint32_t)(BOUNCE_SIZE / UFS_BLOCK));
++			nb = MIN(nb, (uint32_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk));
++			error = ufs_read_blocks(base + 1 + blk, nb);
++			if (error) {
++				break;
++			}
++			take = MIN(nb * UFS_BLOCK - off, chunk - o);
++			memcpy(sweet_log_dump_buf + done + o,
++			    (const char *)bounce + off, take);
++			o += take;
++		}
++		done += chunk;
++	}
++	lck_mtx_unlock(&sweet_ufs_lock);
++	if (error) {
++		printf("SWEET LOG: cannot read the log ring (%d)\n", error);
++		return;
++	}
++
++	/* Split the filter list on commas and spaces. */
++	for (char *s = grep; *s != 0 && nwords < SWEET_LOG_GREP_WORDS; ) {
++		char *e;
++		size_t wl;
++
++		while (*s == ',' || *s == ' ') {
++			s++;
++		}
++		e = s;
++		while (*e != 0 && *e != ',' && *e != ' ') {
++			e++;
++		}
++		wl = (size_t)(e - s);
++		if (wl > 0) {
++			if (wl >= SWEET_LOG_GREP_WORD) {
++				wl = SWEET_LOG_GREP_WORD - 1;
++			}
++			memcpy(words[nwords], s, wl);
++			words[nwords][wl] = 0;
++			nwords++;
++		}
++		s = e;
++	}
++
++	printf("SWEET LOG: last %u KiB of the previous boot's console (%llu bytes, %d filters)\n",
++	    want >> 10, (unsigned long long)total, nwords);
++
++	for (uint32_t i = 0; i < want && printed < maxlines; ) {
++		const char *p = sweet_log_dump_buf + i;
++		uint32_t j = i, len;
++		bool seen = false;
++
++		while (j < want && sweet_log_dump_buf[j] != '\n') {
++			j++;
++		}
++		len = j - i;
++		i = j + 1;
++		if (len > 0 && p[len - 1] == '\r') {
++			len--;
++		}
++		while (len > 0 && (*p == ' ' || *p == '\t')) {
++			p++;
++			len--;
++		}
++		while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) {
++			len--;
++		}
++		if (len == 0) {
++			continue;
++		}
++		if (nwords > 0 && !sweet_log_dump_match(p, len, words, nwords)) {
++			continue;
++		}
++		/* Collapse the cycles a crash loop repeats (exec, CRASH, ...). */
++		for (int k = 0; k < SWEET_LOG_DUMP_HIST; k++) {
++			if (histlen[k] == len && memcmp(hist[k], p, len) == 0) {
++				seen = true;
++				break;
++			}
++		}
++		if (seen) {
++			repeats++;
++			continue;
++		}
++		if (len > SWEET_LOG_DUMP_LINE - 1) {
++			len = SWEET_LOG_DUMP_LINE - 1;
++		}
++		memcpy(hist[histpos], p, len);
++		histlen[histpos] = len;
++		histpos = (histpos + 1) % SWEET_LOG_DUMP_HIST;
++		memcpy(out, p, len);
++		out[len] = 0;
++		printf("LOG %s\n", out);
++		printed++;
++	}
++	printf("SWEET LOG: end of dump (%u lines, %u repeats skipped)\n", printed, repeats);
++	if (halt) {
++		sweet_log_dump_halt();
++	}
+ }
+ 
+ /* Root device for rd=ufsroot0 (IOFindBSDRoot). */
