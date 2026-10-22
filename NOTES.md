@@ -62,6 +62,22 @@ image v15) and are NOT affected.
   screen, much faster logs. `CPUS=N tools/curtana-build.sh ...` builds the
   variants (`shim/out/shim-boot-curtana-c4.img`, `-c6.img`; `CPUS=6` = the six
   A55, `CPUS=8` would add the two A76 and is untested).
+- **2026-10-22 19:45: text patching trips the code-signing page check.**
+  Boot with the stub patch (v4) shows, immediately before every crash:
+  `CODE SIGNING: cs_invalid_page(0x...): p=NNN[mobileactivation]` /
+  `final status 0x22000000, allowing (remove VALID) page` /
+  `Text page corruption detected for pid NNN` / `crash sig 5 code 0x600000001`.
+  So the off-trap is *not* the deliberate `__os_crash` any more (that call now
+  returns): the kernel notices the modified text page and the process dies
+  somewhere else (`sub - mh` = 0x1B75BC and 0x1EF5BC in two launches, i.e.
+  different sites each time, and those file offsets hold plain `movk`
+  instructions -> the page the process executes no longer matches the file).
+  The kernel has the usual switches: `strings kernel | grep cs_enforcement` ->
+  `cs_enforcement_disable`, `amfi_get_out_of_my_way`, `cs_enforcement_panic`.
+  Boot image `shim/out/shim-boot-curtana-c4-cs.img` = c4 + `sweetsample=SpringBoard
+  cs_enforcement_disable=1 amfi_get_out_of_my_way=1`; unverified (next boot).
+  Lesson: any change to `__TEXT` of an iOS binary has to be accompanied by
+  `cs_enforcement_disable=1`, otherwise the page is invalidated.
 - **2026-10-22 19:30: the diff flash MUST NOT touch the HFS+ journal (it did).**
   Flashing the 712-block diff left the phone unable to mount the volume
   ("many `mount() failed`" on screen, no root): those 712 blocks included the
