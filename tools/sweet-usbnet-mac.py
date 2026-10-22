@@ -57,8 +57,20 @@ def main():
 
     print(f"phone USB Ethernet: {iface}", file=sys.stderr)
     if not args.no_addr:
-        subprocess.run(["sudo", "ifconfig", iface, "inet", HOST_IP,
-                        "netmask", "255.255.255.0"], check=False)
+        pw = os.environ.get("SUDOPASS")
+        if pw:
+            r = subprocess.run(["sudo", "-S", "ifconfig", iface, "inet", HOST_IP,
+                                "netmask", "255.255.255.0"],
+                               input=pw + "\n", capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"ifconfig failed: {r.stderr.strip()}", file=sys.stderr)
+        else:
+            r = subprocess.run(["sudo", "-n", "ifconfig", iface, "inet", HOST_IP,
+                                "netmask", "255.255.255.0"], capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"run this by hand (sudo needs a password):\n"
+                      f"  sudo ifconfig {iface} inet {HOST_IP} netmask 255.255.255.0",
+                      file=sys.stderr)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

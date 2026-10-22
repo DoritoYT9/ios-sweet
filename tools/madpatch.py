@@ -65,12 +65,37 @@ def find(d):
     return out
 
 
+def patch_stub(d):
+    """Turn the binary's own `__os_crash` trampoline into a plain `ret`.
+
+    Some `bl __os_crash` sites are inside the control-flow-flattened code and
+    cannot be rewritten into an epilogue, so instead neuter the stub every one
+    of them jumps through: `adrp/ldr/br` -> `ret; nop; nop`."""
+    sites = [off for off in range(0, len(d) - 12, 4)
+             if (struct.unpack_from('<I', d, off)[0] & 0xfc000000) == 0x94000000
+             and bl_target(BASE + off, struct.unpack_from('<I', d, off)[0]) == OSCRASH]
+    if not sites:
+        return 'no __os_crash call sites'
+    o = OSCRASH - BASE
+    insn = [struct.unpack_from('<I', d, o + 4 * i)[0] for i in range(3)]
+    if d[o:o + 12] == b'\xc0\x03\x5f\xd6' + b'\x1f\x20\x03\xd5' * 2:
+        return 'stub already returns'
+    if (insn[0] & 0x9f000000) != 0x90000000 or (insn[1] & 0xffc00000) != 0xf9400000 \
+            or (insn[2] & 0xfffffc1f) != 0xd61f0000:
+        return f'0x{OSCRASH:x} is not the expected adrp/ldr/br stub: {d[o:o+12].hex()}'
+    d[o:o + 12] = b'\xc0\x03\x5f\xd6' + b'\x1f\x20\x03\xd5' * 2
+    return f'stub 0x{OSCRASH:x} -> ret ({len(sites)} call sites neutered)'
+
+
 def main():
-    if len(sys.argv) != 2:
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    if len(args) != 1:
         sys.exit(__doc__)
-    path = sys.argv[1]
+    stub = '--stub' in sys.argv or '--stub-only' in sys.argv
+    helpers = '--stub-only' not in sys.argv
+    path = args[0]
     d = bytearray(open(path, 'rb').read())
-    sites = find(d)
+    sites = find(d) if helpers else {}
     print(f'{path}: {len(sites)} crash helpers')
     done = 0
     for fn, at in sorted(sites.items()):
@@ -90,6 +115,10 @@ def main():
         print(f'{done} helper(s) patched')
     else:
         print('nothing to do')
+    if stub:
+        d = bytearray(open(path, 'rb').read())
+        print('stub:', patch_stub(d))
+        open(path, 'r+b').write(d)
 
 
 if __name__ == '__main__':

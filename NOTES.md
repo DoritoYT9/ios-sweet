@@ -62,6 +62,23 @@ image v15) and are NOT affected.
   screen, much faster logs. `CPUS=N tools/curtana-build.sh ...` builds the
   variants (`shim/out/shim-boot-curtana-c4.img`, `-c6.img`; `CPUS=6` = the six
   A55, `CPUS=8` would add the two A76 and is untested).
+- **2026-10-22 19:05: stub `__os_crash` + fast iteration via block diff (image v4).**
+  The 4-helper patch did not stop the loop: besides those helpers there are 13
+  `bl __os_crash` sites in `mobileactivationd`, three of them *inside* the
+  control-flow-flattened code (`0x1BF498`, `0x1BF624`, `0x1BF694`) where no
+  epilogue can be synthesised. So the binary is now pristine except the
+  `__os_crash` trampoline itself: `0x1001BFC10` `adrp/ldr/br` ->
+  `ret; nop; nop` (`madpatch.py --stub-only`, 3 words, verified by diffing the
+  file against the pristine copy in `/tmp/mad.bin`). Every call site now logs
+  and continues instead of trapping.
+  **Flash cost is now seconds, not minutes**: `tools/simgdiff.py OLD.simg
+  NEW.img OUT.simg` walks the sparse image that is on the phone, compares its
+  raw/fill chunks block by block with the edited raw image and emits RAW chunks
+  only for differing blocks (rest DONT_CARE). v3 -> v4 = 712 blocks / 2.9 MB,
+  `fastboot flash userdata` = 0.07 s. Caveat: the diff is against the *flashed*
+  image, so blocks the running system rewrote are left alone (desired), and the
+  rewritten set includes HFS+ journal blocks from the host mount - if the volume
+  ever fails to mount after a diff flash, fall back to the full sparse.
 - **2026-10-22 18:20: `mobileactivationd` BYPASSED IN THE BINARY (image v3).**
   With `cpus=4` the boot gets much further: launchd spawns
   `AccessibilityUIServer`, SpringBoard starts (`SWEET AKS: SpringBoard sel 7`)
