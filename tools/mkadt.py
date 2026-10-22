@@ -29,7 +29,7 @@ TARGETS = {
         'compatible': ['D22AP', 'iPhone10,3', 'xiaomi,sweet', 'qcom,sm7150', 'AppleARM'],
         'model': 'iPhone10,3', 'target_type': 'D22', 'target_sub_type': 'D22AP',
         'io_compat': ['sweet-io', 'arm-io'],
-        'disp_compat': 'sweet,display',
+        'disp_compat': ['sweet,display'],
         'ufs_compat': 'qcom,ufshc',
         'cpu_compat': ['qcom,kryo470', 'ARM,v8'],
         # sweet DRAM (live FDT /memory): 0x80000000+2G and 0x10000000+0xfcc00000.
@@ -44,12 +44,19 @@ TARGETS = {
         'fb_w': 1080, 'fb_h': 2400, 'fb_stride': 1080 * 4,
         'ufs': 0x01d84000, 'ufs_size': 0x3000,
         'timebase': 19200000, 'vtimer': 19,
-        'compatible': ['D22AP', 'iPhone10,3', 'xiaomi,curtana', 'qcom,atoll', 'qcom,sm7125', 'AppleARM'],
+        # The sweet kernel matches drivers by name (iokit/KernelConfigTables.cpp
+        # IONameMatch): the platform expert wants 'xiaomi,sweet', SweetCPU wants
+        # 'qcom,kryo470' and AppleCLCD wants 'sweet,display'. The curtana ADT
+        # has to carry those strings too, otherwise no driver matches and the
+        # catch-all IOPanicPlatform panics with
+        # 'Unable to find driver for this platform: "D22AP"'.
+        'compatible': ['D22AP', 'iPhone10,3', 'xiaomi,curtana', 'xiaomi,sweet',
+                       'qcom,atoll', 'qcom,sm7125', 'AppleARM'],
         'model': 'iPhone10,3', 'target_type': 'D22', 'target_sub_type': 'D22AP',
         'io_compat': ['curtana-io', 'arm-io'],
-        'disp_compat': 'qcom,display',
+        'disp_compat': ['sweet,display', 'qcom,display'],
         'ufs_compat': 'qcom,ufshc',
-        'cpu_compat': ['qcom,kryo465', 'ARM,v8'],
+        'cpu_compat': ['qcom,kryo470', 'qcom,kryo465', 'ARM,v8'],
         # curtana DRAM (live FDT /memory): 0x80000000+0x3cc00000, 0xc0000000+0x40000000,
         # 0x100000000+0x100000000. Every fixed carve-out (hyp 0x80000000, xbl_aop,
         # smem, removed_region 0x80b00000..0x84400000, modem, cdsp, qseecom,
@@ -172,7 +179,7 @@ def build(seed=None, qemu=False, highmem=False, target='sweet'):
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
-            ('compatible', cstr(t['disp_compat'])),
+            ('compatible', b''.join(cstr(c) for c in t['disp_compat'])),
             ('canvas-width', u32(1125)),
             ('canvas-height', u32(2436)),
         ])])
