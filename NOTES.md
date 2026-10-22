@@ -41,6 +41,29 @@ image v15) and are NOT affected.
   The GitHub artifact API needs auth (401 without a token), so the kernel must be
   fetched with `gh auth login` + `gh run download` or by hand from the Actions
   page into `xnu/out-0081/`.
+- **2026-10-22 16:40: XNU BOOTS on curtana.** With the ADT fix below (kernel
+  0081 + `shim/out/curtana.adt`), the kernel no longer panics in
+  `IOPlatformExpert`: the platform expert registers, `SweetCPU` and `AppleCLCD`
+  attach and the UFS driver runs. The phone now loops with
+  `mount(N) failed` (iokit/bsddev/IOKitBSDInit.cpp:695, `mountAttempts`),
+  i.e. XNU is alive and retrying to mount the root.
+  **Why the root fails:** the SWEET UFS driver (patch 0028) looks for the GPT
+  partition named by the boot arg `ufsroot=` (default `userdata`) on LUN 0 and
+  exposes it as the BSD disk `ufsroot0`; the root is mounted with
+  `rd=ufsroot0`. On curtana `userdata` holds **Android's ext4**, not an iOS
+  HFS+ volume, so the HFS+ mount fails. Next step: put an iOS HFS+ root image
+  in that partition (like sweet's `ios16-root-20H392-vN.img`), which is
+  destructive for Android's userdata (needs the user's OK and a backup).
+- **2026-10-22 16:33: the ADT must carry the strings the sweet kernel matches.**
+  `iokit/KernelConfigTables.cpp` matches drivers by name (`IONameMatch`):
+  `SweetPlatformExpert` wants **`xiaomi,sweet`**, `SweetCPU` wants
+  **`qcom,kryo470`** and `AppleCLCD` wants **`sweet,display`**. The curtana ADT
+  only had the curtana spellings, so nothing matched and the catch-all
+  `IOPanicPlatform` panicked with
+  `Unable to find driver for this platform: "D22AP"` (the DT root is renamed
+  to its first "compatible" entry by IODeviceTreeSupport.cpp:217).
+  `tools/mkadt.py` now emits both spellings; `D22AP` stays first so
+  `hw.target`/MobileGestalt does not change.
 - **2026-10-22 16:25: the SWEET kernel is on the phone.** `gh auth login` (device
   code) -> `gh run download 39158169212 -n xnu-kernel -D xnu/out-0081` ->
   `xnu/out-0081/kernel.development.sweet` (17 MB Mach-O arm64, SHA256
@@ -48,22 +71,23 @@ image v15) and are NOT affected.
   artifact's SHA256SUMS; contains the sweet fbcon strings, so it is really the
   SWEET build and not the Apple kernelcache).
   Built with `tools/curtana-build.sh xnu/out-0081/kernel.development.sweet`
-  (new helper: ADT -> payload -> shim -> boot image, sweet's cmdline).
+  (new helper: ADT -> payload -> shim -> boot image, sweet's cmdline;
+  `EXTRA="sweetusb=2"` adds the USB live console).
   The SWEET kernel links at **virt_base 0xfffffe0006000000** (the stock Apple
   kernelcache used 0xfffffff006000000), entry VA 0xfffffe000748b488 =
   **PA 0xc54cb488**, 10 segments, kernel_end VA 0xfffffe00084c8000 =
   **PA 0xc64c8000**, all inside the second DRAM bank. Boot image
   `shim/out/shim-boot-curtana.img` = 17 MB (the stock-kernel one was 49 MB).
-- **Is a "curtana kernel" needed? No.** The kernel binary is generic arm64;
-  `sweet` is only the *machine config* name (it carries the D22AP/iPhone10,3
-  identity iOS expects). The hardware is described at runtime by the ADT, which
-  is already the curtana one. SM7150 and SM7125 share the whole early boot
-  path (GICv3 @0x17a00000, PSCI over SMC, UFS HC @0x1d84000, fb @0x9c000000,
-  16K granule, same carve-out layout). What *is* sweet-specific is a handful
-  of driver patches (PMIC/SPMI PM8150 vs curtana's PM6150, GENI SE7 + Goodix
-  GT9896 touch, RPMh A11 vs L11C, panel timings) - that is userland work for
-  later, it does not block the kernel boot. If ever needed, a second machine
-  config can be added to the CI build.
+- **Is a "curtana kernel" needed? Not for the boot.** The kernel binary is
+  generic arm64; `sweet` is only the *machine config* name (it carries the
+  D22AP/iPhone10,3 identity iOS expects). The hardware is described at runtime
+  by the ADT, which is already the curtana one. SM7150 and SM7125 share the
+  whole early boot path (GICv3 @0x17a00000, PSCI over SMC, UFS HC @0x1d84000,
+  fb @0x9c000000, 16K granule, same carve-out layout). What *is* sweet-specific
+  is a handful of driver patches (PMIC/SPMI PM8150 vs curtana's PM6150, GENI
+  SE7 + Goodix GT9896 touch, RPMh A11 vs L11C, panel timings) - that is
+  userland work for later, it does not block the kernel boot. The kernel does
+  hardcode the sweet `IONameMatch` names, which is why the ADT carries them.
 - Earlier state (still true): the old `WR32 start` hang was caused by
   `phys_base` hardcoded to 0x80000000 in tools/mkpayload.py, which put the
   kernel inside curtana's `removed_region@80b00000` carve-out.
