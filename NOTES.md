@@ -62,6 +62,23 @@ image v15) and are NOT affected.
   screen, much faster logs. `CPUS=N tools/curtana-build.sh ...` builds the
   variants (`shim/out/shim-boot-curtana-c4.img`, `-c6.img`; `CPUS=6` = the six
   A55, `CPUS=8` would add the two A76 and is untested).
+- **2026-10-22 20:05: the daemon dies on its own `brk #1`, not on `__os_crash`.**
+  Every crash of the unpatched-helper runs has `pc & 0xfff == 0x5bc`, whatever
+  the page: `0x1BF5BC` is the `brk #1` of the helper at `0x1BF56C`
+  ("Failed to copy container path(s)") in the pristine file
+  (`0x1BF5B4 bl __os_crash / 0x1BF5B8 bl / 0x1BF5BC brk`). So neutering the
+  `__os_crash` stub made the call return, then the helper's *own* trailing
+  `brk` killed the process - and since the failures cascade, it walks from one
+  helper to the next, which is why patching only 4 of them still looped.
+  `madpatch.py` now converts **all ten** helpers (30 words) plus the stub
+  (3 words) = 33 words against the pristine copy, verified. The
+  `cs_invalid_page` / `Text page corruption detected` lines are the kernel
+  noticing those patched pages; `cs_enforcement_disable=1
+  amfi_get_out_of_my_way=1` on the command line does **not** silence them (boot
+  `shim-boot-curtana-c4-cs.img` behaved exactly like the one without) and did
+  not change the outcome, so they are collateral, not the killer.
+  Image **v5** = v4 + the ten helper epilogues (in-place patch, so the extents
+  do not move): diff against v4 is **11 blocks / 45 KB**.
 - **2026-10-22 19:45: text patching trips the code-signing page check.**
   Boot with the stub patch (v4) shows, immediately before every crash:
   `CODE SIGNING: cs_invalid_page(0x...): p=NNN[mobileactivation]` /

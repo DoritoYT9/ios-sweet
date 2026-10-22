@@ -35,9 +35,11 @@ OSCRASH = 0x1001bfc10
 PROLOGUE = b'\xf4\x4f\xbe\xa9' + b'\xfd\x7b\x01\xa9' + b'\xfd\x43\x00\x91'
 EPILOGUE = b'\xfd\x7b\x41\xa9' + b'\xff\x83\x00\x91' + b'\xc0\x03\x5f\xd6'
 BRK = 0xd4200020
-# "Failed to create data ark.", "Migration failed." x2, "Failed to perform
-# boot initialization tasks."
-PATCH_AT = {0x1001bf230, 0x1001bf35c, 0x1001bf3c0, 0x1001bf6a0}
+# Every one of these helpers is a dead end: it logs a CFString and then kills
+# the process with `brk #1` (a few hundred bytes further on, in the same page).
+# The daemon trips them one after another as the failures cascade, so all of
+# them are converted; `--only 0x...` patches just the listed ones.
+PATCH_AT = None      # None = every helper found
 
 
 def bl_target(v, insn):
@@ -92,6 +94,10 @@ def main():
     if len(args) != 1:
         sys.exit(__doc__)
     stub = '--stub' in sys.argv or '--stub-only' in sys.argv
+    only = None
+    for a in sys.argv[1:]:
+        if a.startswith('--only'):
+            only = {int(x, 16) for x in a.split('=')[1].split(',')}
     helpers = '--stub-only' not in sys.argv
     path = args[0]
     d = bytearray(open(path, 'rb').read())
@@ -103,7 +109,8 @@ def main():
         if cur == EPILOGUE:
             print(f'  {fn:#x} already patched')
             continue
-        if fn not in PATCH_AT:
+        want = PATCH_AT if only is None else only
+        if want is not None and fn not in want:
             print(f'  {fn:#x} left fatal ({cur.hex()})')
             continue
         assert struct.unpack_from('<I', d, at)[0] & 0xfc000000 == 0x94000000
