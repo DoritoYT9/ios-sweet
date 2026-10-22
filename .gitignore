@@ -8,3 +8,8 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+iosroot/
+ipsw/
+logs/
+*.img
+*.simg

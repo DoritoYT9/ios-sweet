@@ -8,6 +8,53 @@ sweet notes below still describe the working sweet system (iOS home screen on
 image v15) and are NOT affected.
 
 ### State at the end of 2026-10-22
+- **2026-10-22 17:00: the iOS 16.7.16 ROOT IMAGE IS BUILT ON THIS MAC.**
+  `tools/mkiosroot-mac.sh` is the macOS port of the Linux `tools/mkiosroot.sh`
+  (which needs apfs-fuse + hfsprogs). The user has **no Linux machine**, so
+  the root had to be rebuilt here from the IPSW that is already on this Mac
+  (`ipsw/extracted/087-86698-044.dmg` = OS rootfs, `087-86593-047.dmg` =
+  Cryptex1,SystemOS, `087-86715-047.dmg` = Cryptex1,AppOS; the mapping comes
+  from `ipsw/extracted/BuildManifest.plist`).
+  What the port needed:
+  - The APFS dmgs mount read-only with `hdiutil attach -readonly` (the cryptexes
+    are raw APFS, they mount fine too). **macOS cannot report the ownership of
+    a case-sensitive APFS volume** (it is mounted `noowners`: macOS does not
+    support owners on case-sensitive volumes), so `apfs-fuse`'s uid/gid are
+    not available here: everything lands as root:wheel and the paths that need
+    another owner are fixed explicitly (mobile 501 under /private/var/mobile,
+    _logd 272 under /private/var/db). The IPSW `.mtree` that has the exact
+    metadata is an IM4P with an LZFSE payload and macOS' libcompression APIs
+    are stubs in this sandbox, so it could not be decoded.
+  - The HFS+ volume is built **raw**: `hdiutil attach -nomount -imagekey
+    diskimage-class=CRawDiskImage` on the image file, `newfs_hfs -s -J -v
+    iOSRoot` on that device and `mount -t hfs`. `-s` (case sensitive, like
+    iOS) and the raw layout (volume at offset 0, no GPT/DMG wrapper) are what
+    XNU needs: the image can be flashed at the first bytes of a partition.
+    `hdiutil create -fs HFS+ -fsargs "-s"` also works but adds a GPT.
+  - Result (same as sweet's image v4+): 19 cryptex files hard-linked into the
+    root (7 from the OS cryptex, 12 from the App cryptex - the exact list in
+    the sweet notes), 44 dyld shared cache files hard-linked into
+    /System/Library/Caches/com.apple.dyld, 7 `_PanicOnCrash` renamed, 2
+    CommCenter jobs removed, the container dirs, VirtualAudio disabled and the
+    migration/SpringBoard/purplebuddy prefs (`tools/sweet-root-tweaks.py`).
+    `fsck_hfs`: "The volume iOSRoot appears to be OK". 11 GB used of 16 GiB.
+  - `tools/raw2simg.py` converts the raw image to an **Android sparse** image
+    (the ABL refuses a raw download bigger than max-download-size and the
+    fastboot client reads the whole file into RAM - the sweet notes say the
+    same: always flash the sparse image).
+- **2026-10-22 16:40: XNU BOOTS on curtana.** With the ADT fix below (kernel
+  0081 + `shim/out/curtana.adt`), the kernel no longer panics in
+  `IOPlatformExpert`: the platform expert registers, `SweetCPU` and `AppleCLCD`
+  attach and the UFS driver runs. The phone now loops with
+  `mount(N) failed` (iokit/bsddev/IOKitBSDInit.cpp:695, `mountAttempts`),
+  i.e. XNU is alive and retrying to mount the root.
+  **Why the root fails:** the SWEET UFS driver (patch 0028) looks for the GPT
+  partition named by the boot arg `ufsroot=` (default `userdata`) on LUN 0 and
+  exposes it as the BSD disk `ufsroot0`; the root is mounted with
+  `rd=ufsroot0`. On curtana `userdata` holds **Android's ext4**, not an iOS
+  HFS+ volume, so the HFS+ mount fails. Next step: flash the image built
+  above into that partition (destructive for Android's userdata; the user
+  approved it without a backup).
 - **The shim works end to end on curtana (2026-10-22, verified on the phone).**
   Screen (red debug screen, top to bottom):
   `INITRD lo=A6169000 hi=A91FECF0` / `SCTLR M=0 C=0` / `MMFR0 tg4=1 tg16=0` /
