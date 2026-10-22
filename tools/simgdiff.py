@@ -25,12 +25,68 @@ MAGIC = 0xed26ff3a
 RAW, FILL, DONT_CARE = 0xcac1, 0xcac2, 0xcac3
 
 
+def protected_ranges(path):
+    """Byte ranges at the start of the image that must never be rewritten.
+
+    A diff flash used to write the host's copy of the HFS+ journal and volume
+    header over the phone's, after which the phone could not mount the volume
+    any more ("mount() failed").  The journal describes transactions relative to
+    the state of the *host* mount, so it must be left alone; the volume header
+    carries the mounted/dirty flags and lastMountedVersion, same story.
+    """
+    size = os.path.getsize(path)
+    with open(path, 'rb') as f:
+        f.seek(1024)
+        hdr = f.read(512)
+    sig, ver, attr, lastmnt, jib = struct.unpack_from('>HHIII', hdr, 0)
+    blk = struct.unpack_from('>I', hdr, 40)[0]
+    total = struct.unpack_from('>I', hdr, 44)[0]
+    out = [(0, 2048)]                       # primary volume header (+ boot blocks)
+    note = f'volume header sig 0x{sig:04x} ver 0x{ver:04x} journalInfoBlock {jib} blockSize {blk}'
+    if total and blk and total * blk <= size:
+        out.append((total * blk - 2048, total * blk))   # alternate volume header
+    # The JournalInfoBlock's block number is documented as an allocation block,
+    # but some tools store a 512-byte block: accept whichever parses sanely.
+    best = None
+    for unit in (blk, 512):
+        if not jib or not unit:
+            continue
+        at = jib * unit
+        if at + 52 > size:
+            continue
+        with open(path, 'rb') as f:
+            f.seek(at)
+            j = f.read(52)
+        flags = struct.unpack_from('>I', j, 0)[0]
+        off, jsize = struct.unpack_from('>QQ', j, 36)
+        if not (off and jsize and off + jsize <= size and 1 << 20 <= jsize <= 1 << 29):
+            continue
+        score = 1 + (flags & 1)          # kJIJournalInFSMask
+        if best is None or score > best[0]:
+            best = (score, at, off, jsize, unit)
+    if best:
+        _, at, off, jsize, unit = best
+        out.append((at, at + max(blk, 4096)))            # the JournalInfoBlock
+        out.append((off, off + jsize))                   # the journal itself
+        note += f'; journal {off:#x}+{jsize:#x} (unit {unit})'
+    else:
+        note += '; no sane JournalInfoBlock, protecting only the headers'
+    return out, note
+
+
 def main():
     if len(sys.argv) != 4:
         sys.exit(__doc__)
     old, new, out = sys.argv[1:4]
     if not os.path.exists(new):
         sys.exit(f'{new}: no such file')
+    skip = '--no-skip-journal' not in sys.argv
+    guard, note = protected_ranges(new) if skip else ([], 'journal NOT protected')
+    print(f'guard: {note}')
+    blk_size = 4096
+    guard_set = set()
+    for s, e in guard:
+        guard_set.update(range(s // blk_size, (e + blk_size - 1) // blk_size))
 
     ops = []            # (kind, lba, nblocks, bytes-or-None)
     lba = 0
@@ -56,16 +112,19 @@ def main():
                 ops.append((DONT_CARE, lba, n, None))
                 lba += n
                 continue
-            if base is None:
-                ops.append((RAW, lba, n, cur))
-                lba += n
-                continue
-            # split the chunk into runs of equal/differing blocks
+            # split the chunk into runs of equal/differing blocks; blocks inside
+            # a guarded range are never rewritten, whatever differs there
             i = 0
             while i < n:
-                same = base[i * blk:(i + 1) * blk] == cur[i * blk:(i + 1) * blk]
+                def same_at(k):
+                    if lba + k in guard_set:
+                        return True
+                    if base is None:
+                        return False
+                    return base[k * blk:(k + 1) * blk] == cur[k * blk:(k + 1) * blk]
+                same = same_at(i)
                 j = i + 1
-                while j < n and (base[j * blk:(j + 1) * blk] == cur[j * blk:(j + 1) * blk]) == same:
+                while j < n and same_at(j) == same:
                     j += 1
                 if same:
                     ops.append((DONT_CARE, lba + i, j - i, None))

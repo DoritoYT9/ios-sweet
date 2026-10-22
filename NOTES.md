@@ -62,6 +62,21 @@ image v15) and are NOT affected.
   screen, much faster logs. `CPUS=N tools/curtana-build.sh ...` builds the
   variants (`shim/out/shim-boot-curtana-c4.img`, `-c6.img`; `CPUS=6` = the six
   A55, `CPUS=8` would add the two A76 and is untested).
+- **2026-10-22 19:30: the diff flash MUST NOT touch the HFS+ journal (it did).**
+  Flashing the 712-block diff left the phone unable to mount the volume
+  ("many `mount() failed`" on screen, no root): those 712 blocks included the
+  journal and the volume header as rewritten by the host mount, i.e. a journal
+  describing transactions relative to the Mac's copy of the volume. Recovery:
+  full `v4-full.simg` flash (22/22, 330 s). `simgdiff.py` now parses the HFSX
+  volume header (`journalInfoBlock`, allocation block size, volume size),
+  locates the `JournalInfoBlock` (accepting either 4096- or 512-byte block
+  units, whichever parses sanely) and never emits the journal range, the
+  JournalInfoBlock, or the primary/alternate volume headers; it prints what it
+  protects. Re-run of the same diff: 588 blocks / 2.4 MB (was 712). Unverified
+  whether that is now safe --- the next diff flash is the test.
+  Also: `cp` over the binary inside the mounted image reallocates its extents,
+  so the diff grows from 12 bytes to the whole 2.4 MB file. Patching in place
+  (`madpatch.py` writes with r+b, no truncate) keeps the extents.
 - **2026-10-22 19:05: stub `__os_crash` + fast iteration via block diff (image v4).**
   The 4-helper patch did not stop the loop: besides those helpers there are 13
   `bl __os_crash` sites in `mobileactivationd`, three of them *inside* the
