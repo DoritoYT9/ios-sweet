@@ -1,5 +1,95 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## NEW TARGET: curtana (Xiaomi Redmi Note 9S, SM7125 / Snapdragon 720G) - 2026-10-22
+
+**Goal:** boot the stock iOS 16.7.16 (SWEETXNU) kernel on curtana with the ARM64 shim
+(ABL -> shim -> XNU), the same way sweet works today. This is a *new* target; the
+sweet notes below still describe the working sweet system (iOS home screen on
+image v15) and are NOT affected.
+
+### State at the end of 2026-10-22
+- The shim boots on curtana: ABL loads it, it draws the red debug screen, finds
+  the SWEETXNU payload in the ABL ramdisk, parses the live DTB, and then
+  **hangs in the first segment copy** (last line on screen: `WR32 start`).
+- **The MMU hypothesis is REFUTED.** During the loader path the MMU is still
+  OFF: `shim_main()` calls `loader_boot()` first and only reaches `mmu_enable()`
+  (shim/mmu.c) when there is *no* payload, a path the payload never takes. So
+  every copy is a raw physical store and no page table / WB_FLAGS / Device
+  memory mapping is involved. The shim now prints `SCTLR M=0 C=0` at the top of
+  the loader so the screen proves it.
+- **Likely root cause (hypothesis, still to be confirmed on hardware):** the
+  physical destination was wrong. `tools/mkpayload.py` had been patched to
+  hardcode `phys_base = 0x80000000`, so the kernel `__TEXT` landed at
+  **0x81004000**, which is inside curtana's live-FDT carve-out
+  `reserved-memory/removed_region@80b00000` (0x80B00000..0x84400000, 57 MB,
+  "removed-dma-pool"). A plain store into a secure-world carve-out never
+  completes (the core waits for a bus answer that never comes) => frozen
+  screen with no exception, which is exactly what we see. Same reason the
+  sweet project puts the kernel at 0xb0000000, *above* every Qualcomm carve-out.
+- **Fix applied:** `tools/mkpayload.py` takes `phys_base`/`mem_size` from the
+  ADT again (`/chosen/dram-base` + `dram-size`, single source of truth);
+  `tools/mkadt.py` has a per-target `phys_base`/`mem_size`
+  (`sweet` = 0xb0000000/0x4d000000 unchanged, `miatoll`/curtana =
+  **0xc4000000/0x3c000000**).
+- **Why not 0xc0000000 for curtana:** the prelink segments (`__PRELINK_TEXT` VA
+  0xfffffff004dc8000, `__PLK_TEXT_EXEC` VA 0xfffffff00558c000) are mapped
+  0x1238000 *below* `virt_base`, so they land 0x1238000 below `phys_base`; the
+  low DRAM bank ends at 0xBCC00000 and 0xBCC00000..0xC0000000 is a DRAM hole.
+  With `phys_base` = 0xc0000000 the prelink copy would have crossed that hole.
+  0xc4000000 keeps the whole image (0xc2dc8000..0xc5ee4000) inside the second
+  bank 0xc0000000..0x100000000, which has no carve-outs and no holes.
+- **Diagnostics added to the shim** (shim/loader.c): `SCTLR M=/C=` print,
+  `PROBE at= rd= got= wr= back=` (read + write + read-back of the destination
+  before the bulk copy, printing *before* each access so the last screen line
+  says which access hung), per-segment copy verification (first/last word) and
+  a guard that refuses to write the kernel over the ramdisk payload.
+- **Artifacts (not in git):** `shim/out/curtana.adt`, `shim/out/payload-curtana.bin`,
+  `shim/out/shim-boot-curtana.img` (49 MB). `dtb/curtana.dtb` and
+  `dtb/boot_unpacked/dtb` = the **live curtana DTB** (used by shim/build.sh);
+  it is a device dump, keep it out of git.
+- **Next action:** the phone is in fastboot (`6fc4567a`). Run
+  `../platform-tools/fastboot boot shim/out/shim-boot-curtana.img` and
+  **photograph the screen** (drop the photo in the repo; the agent can read
+  image files). Read the last line:
+  - `PROBE at=... rd=` and nothing else => the *read* of the destination hangs
+    (region absent / bus hang).
+  - `PROBE ... got=` shown, no `wr=` => the *write* hangs (write-protected
+    carve-out).
+  - `PROBE ... back=` + `SEG i=0 dst=0xc5004000` + the copies => the copy works,
+    the kernel is in plain DRAM; continue to the XNU boot itself.
+  - A blue panic screen instead => the store faulted; ESR/FAR are printed.
+
+### curtana hardware facts (from the live DTB, `dtb/curtana.dtb`)
+- DRAM: 0x80000000+0x3cc00000, 0xc0000000+0x40000000, 0x100000000+0x100000000.
+- Fixed carve-outs (all in the low bank): hyp 0x80000000+0x600000, xbl_aop
+  0x80700000, sec_apps 0x808ff000, smem 0x80900000, **removed_region
+  0x80b00000+0x3900000**, modem 0x86000000, camera/pil/cdsp/adsp/wlan/ipa/gpu,
+  **cont_splash_region 0x9c000000+0x1700000 (the framebuffer)**, dfps,
+  ramoops 0x9d800000, qseecom 0x9e000000, cdsp_sec 0x9f400000. Dynamic
+  shared-dma-pool regions (secure_display 140 MB, adsp 8 MB, qseecom_ta 16 MB,
+  linux,cma 32 MB) have no fixed address.
+- Plain DRAM in the low bank: 0x84400000..0x86000000 and 0x9fd20000..0xbcc00000
+  (31 MB, too small for the 49 MB kernel image); the second bank
+  (0xc0000000..0x100000000) is completely free of carve-outs.
+- MMIO is the same as sweet: GICD 0x17a00000, GICR 0x17a60000, UFS 0x1d84000,
+  framebuffer 0x9c000000 (1080x2400). So the ADT MMIO values work as-is.
+- Stock boot image: ramdisk at 0xa74dc000, kernel at 0x80008000 (the shim image
+  loads at 0x80008000 too: `base 0x80000000 + kernel_offset 0x8000`; our
+  payload ramdisk goes to 0x81000000, inside the removed_region, but it is only
+  *read* from there and that works).
+
+### Build (curtana)
+```
+python3 tools/mkadt.py shim/out/curtana.adt --target=curtana
+python3 tools/mkpayload.py ipsw/extracted/kernelcache.thin shim/out/curtana.adt shim/out/payload-curtana.bin
+(cd shim && ./build.sh ../shim/out/payload-curtana.bin && cp out/shim-boot.img out/shim-boot-curtana.img)
+```
+`tools/mkadt.py` warns "research/ipsw-x/d22ap.adt missing, no /product node"
+(the Apple D22AP tree is not on this machine) => the ADT has no /product node.
+`tools/mkbootimg_v2.py` (untracked) is the macOS replacement for `mkbootimg`;
+`shim/build.sh` now builds with clang/aarch64-none-elf when the GNU cross
+toolchain is missing, and `tools/sweet-log-pull.sh` works with BSD `stat`.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<

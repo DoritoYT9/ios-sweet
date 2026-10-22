@@ -80,13 +80,13 @@ void con_hex(const char *label, uint64_t v)
 	con_str(label, buf);
 }
 
-void con_hex2(const char *label, const char *a, uint32_t va, const char *b, uint32_t vb)
+void con_hex2(const char *label, const char *a, uint64_t va, const char *b, uint64_t vb)
 {
-	char buf[9];
+	char buf[17];
 	int col = put_str(0, label, YELLOW);
 	col = col < LABEL_COLS ? LABEL_COLS : col + 1;
 	col = put_str(col, a, YELLOW);
-	fmt_hex(buf, va, 8);
+	fmt_hex(buf, va, 16);
 	col = put_str(col, buf, WHITE);
 	if (b) {
 		col = put_str(col + 1, b, YELLOW);

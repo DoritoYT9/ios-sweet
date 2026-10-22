@@ -151,6 +151,11 @@ static uint64_t le64(const uint8_t *p)
 }
 
 /* Name the filesystem whose superblock starts at block lba (f2fs/ext4). */
+static int shim_strcmp(const char *s1, const char *s2) {
+	for (; *s1 == *s2; s1++, s2++) if (*s1 == '\0') return 0;
+	return (unsigned char)*s1 - (unsigned char)*s2;
+}
+
 static const char *fs_type(uint32_t lba)
 {
 	if (read_blocks(lba, 1, data))
@@ -186,8 +191,8 @@ static void list_partitions(uint32_t entry_lba, uint32_t nent)
 		if (((last - first + 1) >> 8) < 64)	/* keep the screen to the big ones */
 			continue;
 		con_hex2(name, "lba=", (uint32_t)first, "MiB=", (uint32_t)((last - first + 1) >> 8));
-		if (!__builtin_strcmp(name, "userdata") || !__builtin_strcmp(name, "cust") ||
-		    !__builtin_strcmp(name, "cache"))
+		if (shim_strcmp(name, "userdata") == 0 || shim_strcmp(name, "cust") == 0 ||
+		    shim_strcmp(name, "cache") == 0)
 			con_str(" fs", fs_type((uint32_t)first));
 	}
 }

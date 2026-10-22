@@ -50,15 +50,49 @@ _Static_assert(__builtin_offsetof(struct boot_args, CommandLine) == 108, "boot_a
 _Static_assert(sizeof(struct boot_args) == 736, "boot_args layout");
 
 /* MMU off: everything is Device memory, so copy in aligned 8-byte words. */
-static void copy64(uintptr_t dst, uintptr_t src, uint64_t n)
+static void copy64(uint64_t dst, uintptr_t src, uint64_t n)
 {
 	volatile uint64_t *d = (volatile uint64_t *)dst;
 	volatile const uint64_t *s = (volatile const uint64_t *)src;
+
 	for (uint64_t i = 0; i < (n + 7) / 8; i++)
 		d[i] = s[i];
 }
 
-static void zero64(uintptr_t dst, uint64_t n)
+/* Is the destination address usable? A plain store into a protected or
+ * absent DRAM hole never completes (the core waits for the bus answer), so
+ * the probe prints before every access: the last line on the screen says
+ * which access hung. */
+static void probe_dst(uint64_t dst)
+{
+	volatile uint32_t *d = (volatile uint32_t *)dst;
+	uint32_t old, back;
+
+	con_hex2("PROBE", "at=", dst, "rd=", 0);
+	old = d[0];
+	con_hex2("PROBE", "at=", dst, "got=", old);
+	d[0] = 0xa5a5a5a5;
+	con_hex2("PROBE", "at=", dst, "wr=", 0xa5a5a5a5);
+	back = d[0];
+	con_hex2("PROBE", "at=", dst, "back=", back);
+	d[0] = old;
+}
+
+/* The copy must land: compare the first and the last word. */
+static int verify_seg(uint64_t dst, uintptr_t src, uint64_t n)
+{
+	volatile const uint64_t *d = (volatile const uint64_t *)dst;
+	volatile const uint64_t *s = (volatile const uint64_t *)src;
+	uint64_t last = (n / 8) - 1;
+
+	if (n < 8)
+		return 0;
+	if (d[0] != s[0] || d[last] != s[last])
+		return -1;
+	return 0;
+}
+
+static void zero64(uint64_t dst, uint64_t n)
 {
 	volatile uint64_t *d = (volatile uint64_t *)dst;
 	for (uint64_t i = 0; i < n / 8; i++)
@@ -86,6 +120,13 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex2("INITRD", "lo=", rd_start, "hi=", rd_end);
 
 	const struct payload *p = (const struct payload *)rd_start;
+	uint64_t sctlr;
+
+	/* The MMU is still off here: every copy below is a raw physical store.
+	 * Print the state so the screen shows it. */
+	__asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+	con_hex2("SCTLR", "M=", sctlr & 1, "C=", (sctlr >> 2) & 1);
+
 	if (!magic_ok(p->magic))
 		return "no SWEETXNU payload";
 	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
@@ -97,23 +138,35 @@ const char *loader_boot(uintptr_t dtb)
 	con_hex("ENTRY", p->entry_va);
 
 	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
-		return "ramdisk overlaps kernel memory";
+// 	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
+// 		return "ramdisk overlaps kernel memory";
 
 	for (uint32_t i = 0; i < p->nsegs; i++) {
 		const struct payload_seg *s = &p->segs[i];
-		uintptr_t dst = s->vmaddr + pa_of_va_base;
-		copy64(dst, rd_start + s->file_off, s->file_size);
+		uint64_t dst = (s->vmaddr - p->virt_base) + p->phys_base;
+		uintptr_t src = rd_start + s->file_off;
+
+		con_hex2("SEG", "i=", i, "dst=", dst);
+		/* The kernel must not be written over the payload we read from. */
+		if (dst < rd_end && dst + s->vmsize > rd_start) {
+			con_str("SEG", "OVERLAPS the ramdisk");
+			return "kernel overlaps the ramdisk";
+		}
+		if (i == 0)
+			probe_dst(dst);
+		copy64(dst, src, s->file_size);
+		if (verify_seg(dst, src, s->file_size))
+			con_str("SEG", "VERIFY FAILED");
 		if (s->vmsize > s->file_size)
 			zero64(dst + ((s->file_size + 7) & ~7UL), s->vmsize - ((s->file_size + 7) & ~7UL));
 	}
 	con_hex2("SEGS", "n=", p->nsegs, "end=", p->kernel_end + pa_of_va_base);
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
-	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
+	uint64_t adt_pa = (p->kernel_end - p->virt_base) + p->phys_base;
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
-	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
-	uintptr_t top = ba_pa + PAGE_16K;
+	uint64_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
+	uint64_t top = ba_pa + PAGE_16K;
 
 	zero64(ba_pa, PAGE_16K);
 	volatile struct boot_args *ba = (volatile struct boot_args *)ba_pa;
@@ -136,7 +189,7 @@ const char *loader_boot(uintptr_t dtb)
 	ba->memSizeActual = p->mem_size;
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 
-	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
+	uint64_t entry_pa = (p->entry_va - p->virt_base) + p->phys_base;
 	con_hex("JUMP", entry_pa);
 	con_str("XNU", "jumping (fbcon clears screen)");
 

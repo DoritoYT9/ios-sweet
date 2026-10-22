@@ -398,6 +398,11 @@ void shim_main(uint64_t dtb)
 
 	stage = "mmu enable";
 	int rc = mmu_enable(&mi);
+	if (rc != 0) {
+		con_hex2("MMU", "FAIL rc=", rc, "line=", __LINE__);
+		while(1);  // Congelar aquí adrede para ver si entró al if
+	}
+	con_hex2("MMU", "rc=", rc, "line=", __LINE__);
 
 	stage = "fill on";
 	uint64_t fill_on = rc ? 0 : ticks_fill(RED);

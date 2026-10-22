@@ -133,7 +133,14 @@ def add_ramdisk_to_adt(adt_blob, phys, size):
 
 
 def adt_dram(adt_blob):
-    """Kernel-managed RAM <base, size> from the ADT's /chosen dram-base/dram-size."""
+    """Kernel-managed RAM <base, size> from the ADT's /chosen dram-base/dram-size.
+
+    The ADT is the single source of truth: the shim copies the kernel to
+    phys_base + (vmaddr - virt_base), so the physical destination must be the
+    RAM the ADT declares. On Qualcomm the choice matters: the low DRAM bank
+    is full of secure-world carve-outs (removed_region, modem, cdsp, ...) and
+    a plain store into one of them never completes.
+    """
     root, _ = adt.parse(adt_blob)
     chosen = next(c for c in root.children if c.name == 'chosen')
     return (struct.unpack('<Q', chosen.prop('dram-base'))[0],
@@ -189,7 +196,9 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
         struct.pack_into('<4Q', out, SEG_TABLE + 32 * i, *t)
     info = dict(cputype=hex(m['cputype']), cpusub=m['cpusub'], fixups=nfix, virt_base=hex(virt_base),
                 entry=hex(m['entry']), kernel_end=hex(kernel_end), ramdisk=ramdisk, size=len(out),
-                segs=[(s['name'], hex(s['vmaddr']), hex(s['vmsize'])) for s in segs])
+                phys_base=hex(PHYS_BASE), mem_size=hex(MEM_SIZE),
+                segs=[(s['name'], hex(s['vmaddr']), hex(s['vmsize']),
+                       hex((s['vmaddr'] - virt_base) + PHYS_BASE)) for s in segs])
     return bytes(out), info
 
 

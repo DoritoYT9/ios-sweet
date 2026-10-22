@@ -86,10 +86,15 @@ int mmu_enable(struct mmu_info *info)
 	if (((img_hi - 1) >> BLK_SHIFT) - (img_lo >> BLK_SHIFT) > 1)
 		return -1;	/* only room for two L3 tables */
 
-	/* L2: Device everywhere RAM or MMIO can be (first 8GB), rest unmapped */
+	/* L2: Device everywhere, but RAM range (0x80000000 - 0xC0000000) marked as WB_FLAGS for copy */
 	zero_table(l2);
-	for (uint64_t i = 0; i < (8UL << 30) >> BLK_SHIFT; i++)
-		l2[i] = (i << BLK_SHIFT) | DEV_FLAGS | D_BLOCK;
+	for (uint64_t i = 0; i < (8UL << 30) >> BLK_SHIFT; i++) {
+		uint64_t pa = i << BLK_SHIFT;
+		if (pa >= 0x80000000UL && pa < 0xC0000000UL)
+			l2[i] = pa | WB_FLAGS | D_BLOCK;
+		else
+			l2[i] = pa | DEV_FLAGS | D_BLOCK;
+	}
 	l2[FB_PHYS >> BLK_SHIFT] = (FB_PHYS & ~(BLK_SIZE - 1)) | NC_FLAGS | D_BLOCK;
 
 	/* L3 for each block that holds part of the image */
@@ -98,7 +103,7 @@ int mmu_enable(struct mmu_info *info)
 		uint64_t base = blk << BLK_SHIFT;
 		for (int i = 0; i < NENT; i++) {
 			uint64_t pa = base + ((uint64_t)i << PG_SHIFT);
-			int ours = pa >= img_lo && pa < img_hi;
+			int ours = (pa >= img_lo && pa < img_hi) || (pa >= 0x80000000UL && pa < 0xC0000000UL);
 			l3[i] = pa | (ours ? WB_FLAGS : DEV_FLAGS) | D_PAGE;
 		}
 		l2[blk] = (uintptr_t)l3 | D_TABLE;
