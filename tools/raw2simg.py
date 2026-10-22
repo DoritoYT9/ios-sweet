@@ -20,6 +20,7 @@ import sys
 
 SPARSE_MAGIC = 0xED26FF3A
 CHUNK_RAW = 0xCAC1
+CHUNK_FILL = 0xCAC2
 CHUNK_DONT_CARE = 0xCAC3
 FILE_HDR_SZ = 28
 CHUNK_HDR_SZ = 12
@@ -78,7 +79,11 @@ def main():
                         f.seek(pos)
                         break
                     run += 1
-                out.write(struct.pack('<HHII', CHUNK_DONT_CARE, 0, run, CHUNK_HDR_SZ))
+                # FILL (not DONT_CARE): the flash has to write the zeros, the
+                # partition still holds Android's ext4 data and a sparse flash
+                # that skips the blocks would leave it inside the HFS+ volume.
+                out.write(struct.pack('<HHII', CHUNK_FILL, 0, run, CHUNK_HDR_SZ + 4))
+                out.write(b'\0\0\0\0')
                 chunks += 1
                 written_blks += run
                 continue

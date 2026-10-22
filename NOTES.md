@@ -8,6 +8,21 @@ sweet notes below still describe the working sweet system (iOS home screen on
 image v15) and are NOT affected.
 
 ### State at the end of 2026-10-22
+- **2026-10-22 17:20: THE iOS ROOT IS FLASHED INTO curtana's `userdata`.**
+  `fastboot -S 512M flash userdata iosroot/ios16-root-20H392-v1.simg`:
+  22/22 chunks OKAY, 327 s (`/tmp/flash-userdata.log`). Android's userdata is
+  gone (approved, no backup). The image is 16 GiB of HFS+ written from the
+  first byte of the partition; the partition itself is far bigger (on sweet
+  the same partition is 109643 MiB), so the persistent console log of patch
+  0047 (last 4 MiB of the partition) lands **outside** the volume and cannot
+  corrupt it (it would only be a problem if userdata were < 20 GiB; the
+  `SWEET UFS:` line prints the real size on the next boot).
+  The sparse image uses FILL chunks for zero runs (not DONT_CARE): the flash
+  must write the zeros, otherwise Android's ext4 data stays inside the HFS+
+  volume (a DONT_CARE flash would also leave garbage where the alternate
+  volume header belongs).
+  After the flash the ABL hangs again on `reboot` (same as sweet: every big
+  flash wedges the Xiaomi fastboot, the user must reset with Power ~15 s).
 - **2026-10-22 17:00: the iOS 16.7.16 ROOT IMAGE IS BUILT ON THIS MAC.**
   `tools/mkiosroot-mac.sh` is the macOS port of the Linux `tools/mkiosroot.sh`
   (which needs apfs-fuse + hfsprogs). The user has **no Linux machine**, so
