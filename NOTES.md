@@ -23,6 +23,45 @@ image v15) and are NOT affected.
   volume header belongs).
   After the flash the ABL hangs again on `reboot` (same as sweet: every big
   flash wedges the Xiaomi fastboot, the user must reset with Power ~15 s).
+- **2026-10-22 17:30: `mobileactivationd` crash loop explained = image v2.**
+  Boot on v1: kernel + `/sbin/launchd` + `xpcproxy` jobs run from internal UFS
+  (`mount_hfs`, `bluetoothd`, `fairplayd.H2`, ReportCrash, AKS sel 17 works),
+  `backboardd` paints the Apple logo, but `mobileactivationd` dies every few
+  seconds: `CRASH mobileactivationd[N] sig 5 code 0x600000001 sub 0x<pc>` =
+  `(uu_exception 6 = EXC_BREAKPOINT << 32) | uu_code 1 = EXC_ARM_BREAKPOINT`.
+  Observed: `sub - mh = 0x1BF3BC` in the main binary, and
+  `llvm-objdump` there shows `bl __os_crash` + `brk #1` with the CFString
+  **"Migration failed."** (source "main", line 321). So it is a *deliberate*
+  `os_crash`, not corruption: its data-migration step (strings: "Migrating
+  DCRT/UCRT from the keychain", "Data Migration not complete.",
+  `DataMigrationCompleted`, `PreSydroDataMigrationCompleted`) fails because
+  there is no SEP/keychain, and the daemon kills itself.
+  Fix (same idea as sweet v14): seed the data ark so the migration is skipped.
+  `tools/sweet-root-tweaks.py` now writes the keys in both spellings (`X` and
+  `-X`) to **both** paths the binary names:
+  `/private/var/mobile/Library/mad/data_ark.plist` and
+  `<system container>/Library/internal/data_ark.plist`; when the image has no
+  mobileactivationd container (a pristine IPSW has none) the script creates
+  one (`Data/System/<uuid>/.com.apple.mobile_container_manager.metadata.plist`,
+  MCMMetadata* keys) - that is the step the macOS build could not do before,
+  so v1 was flashed without an ark.
+  **Image v2** = v1 + the two arks (mounted rw, tweaks re-run; the HFS+ image
+  itself was patched in place, no rebuild) -> `iosroot/ios16-root-20H392-v2.simg`
+  (26685 chunks, 1,355,128 FILL blocks, 4194304 blocks = 16 GiB, verifier OK).
+  Flashing: **do not interrupt the client**: an interrupted transfer leaves the
+  ABL waiting for the chunk and the next `fastboot flash` prints nothing and
+  hangs (killing the client brings the device back to `fastboot devices`).
+- **2026-10-22 17:50: v2 flashed** (`fastboot -S 512M flash userdata
+  iosroot/ios16-root-20H392-v2.simg`: 22/22 chunks, 326 s, `/tmp/f2.log`;
+  the first attempt was cut at chunk 10 and had to be restarted after a manual
+  ABL reset). Then the boot image was replaced by one with `cpus=4`
+  (`CPUS=4 tools/curtana-build.sh ... shim/out/shim-boot-curtana-c4.img`, a new
+  `CPUS` knob in that script) and `fastboot reboot` returned OKAY (0.002 s) -
+  the ABL does sometimes accept the reboot right after a flash.
+  Boot on cpus=1/v2 printed "a lot about SMP" (user) - SMP patch 0065 is in
+  0081, so the printed SMP lines on the cpus=1 boot are worth reading: they say
+  whether the secondary CPUs were attempted. cpus=1 makes every daemon launch
+  and every drawn frame slow (on sweet the migration UI needed ~60 min).
 - **2026-10-22 17:00: the iOS 16.7.16 ROOT IMAGE IS BUILT ON THIS MAC.**
   `tools/mkiosroot-mac.sh` is the macOS port of the Linux `tools/mkiosroot.sh`
   (which needs apfs-fuse + hfsprogs). The user has **no Linux machine**, so

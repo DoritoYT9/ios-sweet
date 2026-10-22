@@ -90,21 +90,54 @@ def find_container(root, kind, identifier):
     return None
 
 
+def ark_keys():
+    """Data ark contents, in both spellings: the keys carry a '-' prefix in the
+    arks dumped from a live phone and mobileactivationd's os_crash messages
+    ('Migration failed.', 'Data Migration not complete.') come from the
+    migration that DataMigrationCompleted/PreSydroDataMigrationCompleted skip."""
+    keys = {'ActivationState': 'Activated', 'BrickState': False,
+            'BuildVersion': BUILD, 'ProductVersion': VERSION,
+            'DataMigrationCompleted': True, 'PreSydroDataMigrationCompleted': True}
+    return dict(keys, **{'-' + k: v for k, v in keys.items()})
+
+
+def write_ark(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    save(path, ark_keys(), MOBILE, MOBILE, 0o600)
+    print('data ark', os.path.dirname(path))
+
+
+def container(root, kind, identifier):
+    """Container path, creating a system data container when the image has none
+    (only an image built from a live phone carries one)."""
+    c = find_container(root, kind, identifier)
+    if c is not None:
+        return c
+    import uuid
+    u = str(uuid.uuid4()).upper()
+    c = os.path.join(root, 'private/var/containers', kind, u)
+    os.makedirs(c)
+    os.chown(c, 0, 0)
+    os.chmod(c, 0o755)
+    save(os.path.join(c, '.com.apple.mobile_container_manager.metadata.plist'), {
+        'MCMMetadataContentClass': 1,
+        'MCMMetadataIdentifier': identifier,
+        'MCMMetadataInfo': {'MCMMetadataIdentifier': identifier},
+        'MCMMetadataMinimalInfo': {'MCMMetadataIdentifier': identifier, 'MCMMetadataUUID': u},
+        'MCMMetadataUUID': u,
+        'MCMMetadataVersion': 1,
+    }, 0, 0, 0o644)
+    print('container', identifier, u)
+    return c
+
+
 def activation(root):
-    c = find_container(root, 'Data/System', 'com.apple.mobileactivationd')
-    if c is None:
-        print('warning: no mobileactivationd system container in the image; skipped data ark')
-        return
-    d = os.path.join(c, 'Library/internal')
-    os.makedirs(d, exist_ok=True)
-    os.chown(d, MOBILE, MOBILE)
-    os.chmod(d, 0o755)
-    save(os.path.join(d, 'data_ark.plist'), {
-        '-ActivationState': 'Activated', '-BrickState': False,
-        '-BuildVersion': BUILD, '-ProductVersion': VERSION,
-        '-DataMigrationCompleted': True, '-PreSydroDataMigrationCompleted': True,
-    }, MOBILE, MOBILE, 0o600)
-    print('data ark', d)
+    # /private/var/mobile/Library/mad/data_ark.plist is the path
+    # mobileactivationd's binary names outright; the container copy is what a
+    # restore leaves behind.
+    write_ark(os.path.join(root, 'private/var/mobile/Library/mad/data_ark.plist'))
+    write_ark(os.path.join(container(root, 'Data/System', 'com.apple.mobileactivationd'),
+                           'Library/internal/data_ark.plist'))
 
 
 def audio(root):

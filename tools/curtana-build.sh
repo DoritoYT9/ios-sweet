@@ -25,10 +25,12 @@ EXTRA="${EXTRA:-}"
 
 # The ADT carries phys_base/mem_size (0xc4000000/0x3c000000 for curtana) and
 # the MMIO map; mkpayload.py reads them back from it.
+CPUS="${CPUS:-1}"
+
 python3 tools/mkadt.py shim/out/curtana.adt --target=curtana
 
 python3 tools/mkpayload.py "$KERNEL" shim/out/curtana.adt shim/out/payload-curtana.bin \
-	--cmdline "debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 $EXTRA"
+	--cmdline "debug=0xc serial=3 cpus=$CPUS keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1 $EXTRA"
 
 (cd shim && ./build.sh ../shim/out/payload-curtana.bin)
 cp shim/out/shim-boot.img "$OUT"
