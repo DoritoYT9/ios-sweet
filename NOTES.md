@@ -58,10 +58,37 @@ image v15) and are NOT affected.
   (`CPUS=4 tools/curtana-build.sh ... shim/out/shim-boot-curtana-c4.img`, a new
   `CPUS` knob in that script) and `fastboot reboot` returned OKAY (0.002 s) -
   the ABL does sometimes accept the reboot right after a flash.
-  Boot on cpus=1/v2 printed "a lot about SMP" (user) - SMP patch 0065 is in
-  0081, so the printed SMP lines on the cpus=1 boot are worth reading: they say
-  whether the secondary CPUs were attempted. cpus=1 makes every daemon launch
-  and every drawn frame slow (on sweet the migration UI needed ~60 min).
+- **2026-10-22 18:00: `cpus=4` boot** (same v2 image). "A lot about SMP" on
+  screen, much faster logs. `CPUS=N tools/curtana-build.sh ...` builds the
+  variants (`shim/out/shim-boot-curtana-c4.img`, `-c6.img`; `CPUS=6` = the six
+  A55, `CPUS=8` would add the two A76 and is untested).
+- **2026-10-22 18:20: `mobileactivationd` BYPASSED IN THE BINARY (image v3).**
+  With `cpus=4` the boot gets much further: launchd spawns
+  `AccessibilityUIServer`, SpringBoard starts (`SWEET AKS: SpringBoard sel 7`)
+  and backboardd paints, but `mobileactivationd` still crash-loops
+  (`CRASH ... sig 5 code 0x600000001`, PIDs 409+), i.e. **the data ark did not
+  stop it**, and nothing of SpringBoard's UI reaches the panel.
+  Static analysis of the binary: the crash comes from one of 10 small
+  "log + `bl __os_crash` + `brk #1`" helpers (all with the same
+  0x20-byte-frame prologue); they carry the messages "Failed to create data
+  ark.", "Migration failed." (x2), "Failed to perform boot initialization
+  tasks.", "Failed to initialize XPC/lockdown server", "Failed to create
+  serial queue", "Failed to copy container path(s)", "Failed to set/get backup
+  exclusion". The real logic around them is control-flow flattened
+  (`br x17` dispatch + opaque arithmetic), so the caller cannot be patched
+  cleanly; the `bt` frame (0x58674) lands in that obfuscated blob.
+  `tools/madpatch.py` therefore rewrites the **crash helpers** themselves: the
+  three instructions `bl __os_crash / bl <x> / brk #1` become the function's
+  own epilogue (`ldp x29,x30,[sp,#0x10] / add sp,sp,#0x20 / ret`), so the
+  caller gets control back and the daemon keeps running. Only the four
+  startup/migration helpers are patched (XPC/queue/lockdown stay fatal; if
+  those fail the daemon is useless anyway). Sites are found by pattern, the
+  tool is idempotent, and it verifies the 12 bytes before writing.
+  **Image v3** = v2 + that patch (`iosroot/ios16-root-20H392-v3.simg`),
+  flashed with the `cpus=4` boot image (`shim/out/shim-boot-curtana-c4.img`).
+  Fallback if it still loops: remove the `com.apple.mobileactivationd` job
+  from launchd.plist (like CommCenter) or throttle it; that also tells us
+  whether SpringBoard *needs* its answer or only suffers from the churn.
 - **2026-10-22 17:00: the iOS 16.7.16 ROOT IMAGE IS BUILT ON THIS MAC.**
   `tools/mkiosroot-mac.sh` is the macOS port of the Linux `tools/mkiosroot.sh`
   (which needs apfs-fuse + hfsprogs). The user has **no Linux machine**, so
