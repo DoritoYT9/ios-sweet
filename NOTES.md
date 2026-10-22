@@ -8,9 +8,42 @@ sweet notes below still describe the working sweet system (iOS home screen on
 image v15) and are NOT affected.
 
 ### State at the end of 2026-10-22
-- The shim boots on curtana: ABL loads it, it draws the red debug screen, finds
-  the SWEETXNU payload in the ABL ramdisk, parses the live DTB, and then
-  **hangs in the first segment copy** (last line on screen: `WR32 start`).
+- **The shim works end to end on curtana (2026-10-22, verified on the phone).**
+  Screen (red debug screen, top to bottom):
+  `INITRD lo=A6169000 hi=A91FECF0` / `SCTLR M=0 C=0` / `MMFR0 tg4=1 tg16=0` /
+  `PFR0 tg64=1 parange=0` / `MIDR 0x51DF805E` / `PHYS base=C4000000 size=3C000000` /
+  `VIRT FFFFFFF006000000` / `ENTRY FFFFFFF0071C4570` / 16x `SEG i= dst=` /
+  `PROBE at=C5004000 rd=0 got=FEEDFBCF wr=A5A5A5A5 back=A5A5A5A5` /
+  `SEGS n=10 end=C5EE4000` / `BOOTARG pa=C5EE8000` / `JUMP C51C4570` /
+  `XNU jumping (fbcon clears screen)`.
+  The copy, the per-segment verification and the ADT/boot_args placement all
+  succeed, and the shim jumps to the kernel entry point.
+- **CPU identity (new prints in shim/loader.c, commit 31343a6):** MIDR
+  0x51DF805E = implementer 0x51 (Qualcomm), part 0x805 = **Kryo 4xx Gold**
+  (A76) => SM7125/Kryo 465 confirmed.
+- **16K granule: SUPPORTED.** ID_AA64MMFR0_EL1 fields (TGran4=[15:12],
+  TGran16=[19:16], TGran64=[23:20]) read `tg4=1 tg16=0 tg64=1`, i.e. the same
+  values sweet reports (NOTES: `ID_AA64MMFR0 = ...101122`), and sweet runs the
+  16K-page XNU. PARange=0 => 40-bit PA. So the XNU port on curtana is viable.
+- **Memory layout is equivalent to sweet:** `phys_base + mem_size` =
+  0xC4000000 + 0x3C000000 = **0x100000000**, exactly the same `real_phys_size`
+  (4 GB) that sweet's 0xB0000000+0x4D000000 gives, so XNU's physmap does not
+  change size. The whole image (0xC2DC8000..0xC5EE4000) sits in the second
+  DRAM bank, which has no carve-outs.
+- **The kernel we booted was the WRONG ONE.** `ipsw/extracted/kernelcache.thin`
+  is the **stock Apple iOS 16.7.16 kernel** (iPhone10,3 / D22AP), *not* the
+  SWEET build: it has no `SWEET FB` / `sweet_fbcon` / `SweetHID` strings. It is
+  **arm64e** (PAC: the Kryo 465 has no PAC -> SIGILL at the first PAC) and it
+  targets Apple hardware with zero Qualcomm support, so it dies instantly after
+  the jump. The red screen after `XNU jumping` is the expected result.
+- **Next: build the payload with the SWEET kernel** (CI run 39158169212,
+  artifact `xnu-kernel` id 12147422947, file `out/kernel.development.sweet`).
+  The GitHub artifact API needs auth (401 without a token), so the kernel must be
+  fetched with `gh auth login` + `gh run download` or by hand from the Actions
+  page into `xnu/out-0081/`.
+- Earlier state (still true): the old `WR32 start` hang was caused by
+  `phys_base` hardcoded to 0x80000000 in tools/mkpayload.py, which put the
+  kernel inside curtana's `removed_region@80b00000` carve-out.
 - **The MMU hypothesis is REFUTED.** During the loader path the MMU is still
   OFF: `shim_main()` calls `loader_boot()` first and only reaches `mmu_enable()`
   (shim/mmu.c) when there is *no* payload, a path the payload never takes. So
@@ -47,17 +80,22 @@ image v15) and are NOT affected.
   `shim/out/shim-boot-curtana.img` (49 MB). `dtb/curtana.dtb` and
   `dtb/boot_unpacked/dtb` = the **live curtana DTB** (used by shim/build.sh);
   it is a device dump, keep it out of git.
-- **Next action:** the phone is in fastboot (`6fc4567a`). Run
-  `../platform-tools/fastboot boot shim/out/shim-boot-curtana.img` and
-  **photograph the screen** (drop the photo in the repo; the agent can read
-  image files). Read the last line:
-  - `PROBE at=... rd=` and nothing else => the *read* of the destination hangs
-    (region absent / bus hang).
-  - `PROBE ... got=` shown, no `wr=` => the *write* hangs (write-protected
-    carve-out).
-  - `PROBE ... back=` + `SEG i=0 dst=0xc5004000` + the copies => the copy works,
-    the kernel is in plain DRAM; continue to the XNU boot itself.
-  - A blue panic screen instead => the store faulted; ESR/FAR are printed.
+- **Next action:** flash the SWEET kernel on curtana.
+  1. Get the kernel: `gh auth login` then
+     `gh run download 39158169212 -R dipa-studio/ios-sweet -n xnu-kernel -D xnu/out-0081`,
+     or download the `xnu-kernel` artifact of run 39158169212 from the Actions
+     page and unzip it into the repo. The file we need is
+     `out/kernel.development.sweet`.
+  2. `python3 tools/mkpayload.py xnu/out-0081/kernel.development.sweet shim/out/curtana.adt shim/out/payload-curtana.bin`
+  3. `(cd shim && ./build.sh ../shim/out/payload-curtana.bin && cp out/shim-boot.img out/shim-boot-curtana.img)`
+  4. `/Users/doritoyt/platform-tools/fastboot flash boot shim/out/shim-boot-curtana.img`
+     then `fastboot reboot`. **Note:** the ABL of this phone does NOT support
+     `fastboot boot` ("unknown command"), so the image must be *flashed*.
+  5. Read the screen: the SWEET kernel has the early framebuffer debug patches
+     (0010/0012) that paint markers and a framebuffer console, so we should see
+     how far XNU gets (`SWEET EARLY n:`).
+- **Reading the screen:** the user reads it out (or photographs it). Last known
+  values of the diagnostic screen are in the state block above.
 
 ### curtana hardware facts (from the live DTB, `dtb/curtana.dtb`)
 - DRAM: 0x80000000+0x3cc00000, 0xc0000000+0x40000000, 0x100000000+0x100000000.
