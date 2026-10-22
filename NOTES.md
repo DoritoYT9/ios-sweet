@@ -62,6 +62,24 @@ image v15) and are NOT affected.
   screen, much faster logs. `CPUS=N tools/curtana-build.sh ...` builds the
   variants (`shim/out/shim-boot-curtana-c4.img`, `-c6.img`; `CPUS=6` = the six
   A55, `CPUS=8` would add the two A76 and is untested).
+- **2026-10-22 20:25: text patches cannot survive on this kernel (image v6 drops the job).**
+  v5 (all ten helpers + stub) behaved like v4: every crash of the daemon is still
+  preceded by `CODE SIGNING: cs_invalid_page(<page>)` / `allowing (remove
+  VALID)` / `Text page corruption detected for pid N`, and the faulting `pc`
+  moves around inside the patched `__TEXT` page as the process executes there.
+  `cs_enforcement_disable=1 amfi_get_out_of_my_way=1` (boot 19:45) changed
+  nothing, and those two boot args belong to AMFI, which on this kernel is a
+  stub, so the check that matters is XNU's own `cs_invalid_page` in
+  `bsd/kern/ubc_subr.c`. **Conclusion: any binary patch of an iOS `__TEXT` needs
+  a kernel patch that skips the page invalidation; the userspace patch alone is
+  not viable.**
+  So **image v6** = v5 with `mobileactivationd` back to its pristine bytes (the
+  33 words restored in place) and its job removed from the *combined*
+  `/System/Library/xpc/launchd.plist` (`tools/drop-job.py`, 529 jobs left; the
+  per-job file under `/System/Library/LaunchDaemons/` does not matter, the same
+  way CommCenter's file is still there and it no longer runs). Diff against v5:
+  213 blocks / 873 KB, flashed in 0.04 s. Expected: no `exec mobileactivationd`
+  and no `cs_invalid_page` noise at all.
 - **2026-10-22 20:05: the daemon dies on its own `brk #1`, not on `__os_crash`.**
   Every crash of the unpatched-helper runs has `pc & 0xfff == 0x5bc`, whatever
   the page: `0x1BF5BC` is the `brk #1` of the helper at `0x1BF56C`
