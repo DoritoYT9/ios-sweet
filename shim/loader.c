@@ -127,6 +127,21 @@ const char *loader_boot(uintptr_t dtb)
 	__asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
 	con_hex2("SCTLR", "M=", sctlr & 1, "C=", (sctlr >> 2) & 1);
 
+	/* CPU identity. xnu is a 16K-page kernel, so the granule support of
+	 * this core decides whether the port can work at all.
+	 * ID_AA64MMFR0_EL1: TGran4=[15:12] TGran16=[19:16] TGran64=[23:20].
+	 * TGran4: 0=4K only, 1=4K+16K, 2=4K+64K, 3=4K+16K+64K. */
+	{
+		uint64_t mmfr0, pfr0, midr;
+
+		__asm__ volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
+		__asm__ volatile("mrs %0, id_aa64pfr0_el1" : "=r"(pfr0));
+		__asm__ volatile("mrs %0, midr_el1" : "=r"(midr));
+		con_hex2("MMFR0", "tg4=", (mmfr0 >> 12) & 0xf, "tg16=", (mmfr0 >> 16) & 0xf);
+		con_hex2("PFR0", "tg64=", (mmfr0 >> 20) & 0xf, "parange=", pfr0 & 0xf);
+		con_hex("MIDR", midr);
+	}
+
 	if (!magic_ok(p->magic))
 		return "no SWEETXNU payload";
 	if (p->version != 1 || (p->adt_off & 7) || (rd_start & 7))
