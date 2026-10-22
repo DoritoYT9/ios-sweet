@@ -41,6 +41,29 @@ image v15) and are NOT affected.
   The GitHub artifact API needs auth (401 without a token), so the kernel must be
   fetched with `gh auth login` + `gh run download` or by hand from the Actions
   page into `xnu/out-0081/`.
+- **2026-10-22 16:25: the SWEET kernel is on the phone.** `gh auth login` (device
+  code) -> `gh run download 39158169212 -n xnu-kernel -D xnu/out-0081` ->
+  `xnu/out-0081/kernel.development.sweet` (17 MB Mach-O arm64, SHA256
+  d9cb893bd2baf841e94cd2001f0ec70c0fea42f045f87f14ae807e4ebc50e1e5, matches the
+  artifact's SHA256SUMS; contains the sweet fbcon strings, so it is really the
+  SWEET build and not the Apple kernelcache).
+  Built with `tools/curtana-build.sh xnu/out-0081/kernel.development.sweet`
+  (new helper: ADT -> payload -> shim -> boot image, sweet's cmdline).
+  The SWEET kernel links at **virt_base 0xfffffe0006000000** (the stock Apple
+  kernelcache used 0xfffffff006000000), entry VA 0xfffffe000748b488 =
+  **PA 0xc54cb488**, 10 segments, kernel_end VA 0xfffffe00084c8000 =
+  **PA 0xc64c8000**, all inside the second DRAM bank. Boot image
+  `shim/out/shim-boot-curtana.img` = 17 MB (the stock-kernel one was 49 MB).
+- **Is a "curtana kernel" needed? No.** The kernel binary is generic arm64;
+  `sweet` is only the *machine config* name (it carries the D22AP/iPhone10,3
+  identity iOS expects). The hardware is described at runtime by the ADT, which
+  is already the curtana one. SM7150 and SM7125 share the whole early boot
+  path (GICv3 @0x17a00000, PSCI over SMC, UFS HC @0x1d84000, fb @0x9c000000,
+  16K granule, same carve-out layout). What *is* sweet-specific is a handful
+  of driver patches (PMIC/SPMI PM8150 vs curtana's PM6150, GENI SE7 + Goodix
+  GT9896 touch, RPMh A11 vs L11C, panel timings) - that is userland work for
+  later, it does not block the kernel boot. If ever needed, a second machine
+  config can be added to the CI build.
 - Earlier state (still true): the old `WR32 start` hang was caused by
   `phys_base` hardcoded to 0x80000000 in tools/mkpayload.py, which put the
   kernel inside curtana's `removed_region@80b00000` carve-out.
